@@ -19,9 +19,18 @@ WHERE NOT EXISTS (SELECT 1 FROM system_info);
 -- 2. Unique constraint so the backend can safely upsert violations
 --    and avoid storing the same AI event twice when the poller
 --    hits the endpoint before the driver finishes the violation.
-ALTER TABLE detected_violations
-  ADD CONSTRAINT IF NOT EXISTS uq_violation_event
-  UNIQUE (source_id, detection_date, start_time, violation_type);
+--    (PostgreSQL doesn't support IF NOT EXISTS on ADD CONSTRAINT,
+--     so we use a DO block to check pg_constraint first.)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'uq_violation_event'
+  ) THEN
+    ALTER TABLE detected_violations
+      ADD CONSTRAINT uq_violation_event
+      UNIQUE (source_id, detection_date, start_time, violation_type);
+  END IF;
+END $$;
 
 -- ============================================================
 -- Done. You can now start the backend server.
