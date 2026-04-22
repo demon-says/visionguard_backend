@@ -65,42 +65,49 @@ app.use(errorHandler);
 
 // ─────────────────────────────────────────────────────────────
 // Start server + AI poller
+// On Vercel (serverless), we skip app.listen() and the poller
+// because Vercel manages the port and functions are ephemeral.
+// The AI poller should run on a persistent server (local/VPS).
 // ─────────────────────────────────────────────────────────────
-app.listen(PORT, async () => {
-  console.log('');
-  console.log('  ██╗   ██╗██╗███████╗██╗ ██████╗ ███╗   ██╗');
-  console.log('  ██║   ██║██║██╔════╝██║██╔═══██╗████╗  ██║');
-  console.log('  ██║   ██║██║███████╗██║██║   ██║██╔██╗ ██║');
-  console.log('  ╚██╗ ██╔╝██║╚════██║██║██║   ██║██║╚██╗██║');
-  console.log('   ╚████╔╝ ██║███████║██║╚██████╔╝██║ ╚████║');
-  console.log('    ╚═══╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝');
-  console.log('');
-  console.log(`  🚌 Vision Guard API — running on port ${PORT}`);
-  console.log(`  📡 Environment : ${process.env.NODE_ENV || 'development'}`);
-  console.log(`  🗄️  Database   : Supabase`);
-  console.log('');
+if (!process.env.VERCEL) {
+  app.listen(PORT, async () => {
+    console.log('');
+    console.log('  ██╗   ██╗██╗███████╗██╗ ██████╗ ███╗   ██╗');
+    console.log('  ██║   ██║██║██╔════╝██║██╔═══██╗████╗  ██║');
+    console.log('  ██║   ██║██║███████╗██║██║   ██║██╔██╗ ██║');
+    console.log('  ╚██╗ ██╔╝██║╚════██║██║██║   ██║██║╚██╗██║');
+    console.log('   ╚████╔╝ ██║███████║██║╚██████╔╝██║ ╚████║');
+    console.log('    ╚═══╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝');
+    console.log('');
+    console.log(`  🚌 Vision Guard API — running on port ${PORT}`);
+    console.log(`  📡 Environment : ${process.env.NODE_ENV || 'development'}`);
+    console.log(`  🗄️  Database   : Supabase`);
+    console.log('');
 
-  // Start the AI poller automatically on server boot
-  try {
-    await startPoller();
-    console.log('  ✅ AI Poller started successfully');
-  } catch (err) {
-    console.warn('  ⚠️  AI Poller failed to start:', err.message);
-    console.warn('     Use POST /api/ai/start to retry after setting the URL.');
-  }
+    // Start the AI poller automatically on server boot
+    try {
+      await startPoller();
+      console.log('  ✅ AI Poller started successfully');
+    } catch (err) {
+      console.warn('  ⚠️  AI Poller failed to start:', err.message);
+      console.warn('     Use POST /api/ai/start to retry after setting the URL.');
+    }
 
-  console.log('');
-  console.log('  Available routes:');
-  console.log('   GET  /health');
-  console.log('   GET  /api/dashboard/summary');
-  console.log('   GET  /api/drivers');
-  console.log('   GET  /api/violations');
-  console.log('   GET  /api/routes');
-  console.log('   GET  /api/reports/kpis');
-  console.log('   GET  /api/settings/all');
-  console.log('   PUT  /api/ai/config   ← update Cloudflare Tunnel URL here');
-  console.log('   GET  /api/ai/status');
-  console.log('');
-});
+    console.log('');
+    console.log('  Available routes:');
+    console.log('   GET  /health');
+    console.log('   GET  /api/dashboard/summary');
+    console.log('   GET  /api/drivers');
+    console.log('   GET  /api/violations');
+    console.log('   GET  /api/routes');
+    console.log('   GET  /api/reports/kpis');
+    console.log('   GET  /api/settings/all');
+    console.log('   PUT  /api/ai/config   ← update Cloudflare Tunnel URL here');
+    console.log('   GET  /api/ai/status');
+    console.log('');
+  });
+}
 
+// Export the Express app for Vercel's serverless handler
 module.exports = app;
+
