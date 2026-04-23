@@ -25,6 +25,7 @@ const settingRoutes    = require('./routes/settings');
 const aiRoutes         = require('./routes/ai');
 const penaltyRoutes    = require('./routes/penalties');
 const fineAmountRoutes = require('./routes/fineAmounts');
+const cronRoutes       = require('./routes/cron');
 
 // ─────────────────────────────────────────────────────────────
 const app = express();
@@ -61,6 +62,7 @@ app.use('/api/settings', settingRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/penalties',    penaltyRoutes);
 app.use('/api/fine-amounts', fineAmountRoutes);
+app.use('/api/cron',         cronRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────
 app.use((req, res) => {
