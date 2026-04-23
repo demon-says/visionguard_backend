@@ -31,10 +31,21 @@ router.post('/:violationId', async (req, res, next) => {
       });
 
     if (error) {
-      if (error.message.includes('no resolved driver')) {
+      const msg = error.message ?? '';
+
+      if (msg.includes('already been issued'))
+        return next(createError(409, msg, 'PENALTY_ALREADY_ISSUED'));
+
+      if (msg.includes('not found'))
+        return next(createError(404, 'Violation not found', 'NOT_FOUND'));
+
+      if (msg.includes('no resolved driver'))
         return next(createError(422, 'Violation has no resolved driver — cannot issue penalty', 'NO_DRIVER'));
-      }
-      return next(createError(500, `DB error (issue_penalty): ${error.message}`, 'DB_ERROR'));
+
+      if (msg.includes('No fine amount configured'))
+        return next(createError(500, msg, 'FINE_AMOUNT_NOT_CONFIGURED'));
+
+      return next(createError(500, `DB error (issue_penalty): ${msg}`, 'DB_ERROR'));
     }
 
     const result = data?.[0];
