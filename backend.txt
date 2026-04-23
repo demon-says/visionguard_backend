@@ -1,0 +1,1928 @@
+
+
+================================================================================
+FILE: ./src\server.js
+================================================================================
+
+// src/server.js
+// ─────────────────────────────────────────────────────────────
+//  Vision Guard – Express.js Backend
+//  Entry point: sets up middleware, mounts all routes,
+//  starts the AI poller, and begins listening.
+// ─────────────────────────────────────────────────────────────
+
+require('dotenv').config();
+
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+
+const { errorHandler } = require('./middleware/errorHandler');
+const { startPoller } = require('./services/aiPoller');
+
+// ── Route modules ─────────────────────────────────────────────
+const dashboardRoutes = require('./routes/dashboard');
+const driverRoutes = require('./routes/drivers');
+const violationRoutes = require('./routes/violations');
+const fleetRoutes = require('./routes/fleetRoutes');
+const reportRoutes = require('./routes/reports');
+const settingRoutes = require('./routes/settings');
+const aiRoutes = require('./routes/ai');
+
+// ─────────────────────────────────────────────────────────────
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// ── Security & parsing middleware ─────────────────────────────
+app.use(helmet());
+
+// Sanitize CORS origin (Vercel env vars sometimes contain trailing whitespace)
+const corsOrigin = (process.env.CORS_ORIGIN || 'http://localhost:5173').trim();
+app.use(cors({
+  origin: corsOrigin.includes(',') ? corsOrigin.split(',').map(s => s.trim()) : corsOrigin,
+  credentials: true,
+}));
+app.use(express.json({ limit: '2mb' }));
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+// ── Health check (no auth needed) ────────────────────────────
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'Vision Guard API',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ── API routes ────────────────────────────────────────────────
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/drivers', driverRoutes);
+app.use('/api/violations', violationRoutes);
+app.use('/api/routes', fleetRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/settings', settingRoutes);
+app.use('/api/ai', aiRoutes);
+
+// ── 404 handler ───────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ success: false, error: 'Route not found', code: 'NOT_FOUND' });
+});
+
+// ── Global error handler (must be last) ──────────────────────
+app.use(errorHandler);
+
+// ─────────────────────────────────────────────────────────────
+// Start server + AI poller
+// On Vercel (serverless), we skip app.listen() and the poller
+// because Vercel manages the port and functions are ephemeral.
+// The AI poller should run on a persistent server (local/VPS).
+// ─────────────────────────────────────────────────────────────
+if (!process.env.VERCEL) {
+  app.listen(PORT, async () => {
+    console.log('');
+    console.log('  ██╗   ██╗██╗███████╗██╗ ██████╗ ███╗   ██╗');
+    console.log('  ██║   ██║██║██╔════╝██║██╔═══██╗████╗  ██║');
+    console.log('  ██║   ██║██║███████╗██║██║   ██║██╔██╗ ██║');
+    console.log('  ╚██╗ ██╔╝██║╚════██║██║██║   ██║██║╚██╗██║');
+    console.log('   ╚████╔╝ ██║███████║██║╚██████╔╝██║ ╚████║');
+    console.log('    ╚═══╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝');
+    console.log('');
+    console.log(`  🚌 Vision Guard API — running on port ${PORT}`);
+    console.log(`  📡 Environment : ${process.env.NODE_ENV || 'development'}`);
+    console.log(`  🗄️  Database   : Supabase`);
+    console.log('');
+
+    // Start the AI poller automatically on server boot
+    try {
+      await startPoller();
+      console.log('  ✅ AI Poller started successfully');
+    } catch (err) {
+      console.warn('  ⚠️  AI Poller failed to start:', err.message);
+      console.warn('     Use POST /api/ai/start to retry after setting the URL.');
+    }
+
+    console.log('');
+    console.log('  Available routes:');
+    console.log('   GET  /health');
+    console.log('   GET  /api/dashboard/summary');
+    console.log('   GET  /api/drivers');
+    console.log('   GET  /api/violations');
+    console.log('   GET  /api/routes');
+    console.log('   GET  /api/reports/kpis');
+    console.log('   GET  /api/settings/all');
+    console.log('   PUT  /api/ai/config   ← update Cloudflare Tunnel URL here');
+    console.log('   GET  /api/ai/status');
+    console.log('');
+  });
+}
+
+// Export the Express app for Vercel's serverless handler
+module.exports = app;
+
+
+
+================================================================================
+FILE: ./src\config\supabase.js
+================================================================================
+
+// src/config/supabase.js
+// Supabase client — imported everywhere that needs DB access.
+// Uses the SERVICE ROLE key so RLS policies are bypassed
+// (backend is trusted; RLS protects direct browser access).
+
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
+
+const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('[Supabase] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing in .env');
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false },
+});
+
+module.exports = { supabase };
+
+
+================================================================================
+FILE: ./src\middleware\errorHandler.js
+================================================================================
+
+// src/middleware/errorHandler.js
+// Catches all errors thrown/passed to next() and returns
+// a consistent JSON error response.
+
+function errorHandler(err, req, res, next) {
+  const status  = err.status  || err.statusCode || 500;
+  const message = err.message || 'Internal Server Error';
+  const code    = err.code    || 'INTERNAL_ERROR';
+
+  // Always log unexpected server errors
+  if (status >= 500) {
+    console.error(`[Error] ${req.method} ${req.originalUrl}`, err);
+  }
+
+  res.status(status).json({
+    success : false,
+    error   : message,
+    code,
+  });
+}
+
+// Convenience factory for user-facing HTTP errors
+function createError(status, message, code) {
+  const err    = new Error(message);
+  err.status   = status;
+  err.code     = code || 'REQUEST_ERROR';
+  return err;
+}
+
+module.exports = { errorHandler, createError };
+
+
+================================================================================
+FILE: ./src\routes\ai.js
+================================================================================
+
+// src/routes/ai.js
+// Manages the Cloudflare Tunnel URL and the AI poller lifecycle.
+//
+// GET  /api/ai/config    → current AI URL + poll interval
+// PUT  /api/ai/config    → update AI URL (Cloudflare gives a new one on restart)
+// GET  /api/ai/status    → poller running state + stats
+// POST /api/ai/fetch     → manually trigger one fetch cycle
+// POST /api/ai/start     → start the auto-poller
+// POST /api/ai/stop      → stop  the auto-poller
+// POST /api/ai/restart   → restart with latest DB config
+
+const express        = require('express');
+const { supabase }   = require('../config/supabase');
+const aiPoller       = require('../services/aiPoller');
+const { createError } = require('../middleware/errorHandler');
+
+const router = express.Router();
+
+function assertNoError(error, label) {
+  if (error) throw createError(500, `DB error (${label}): ${error.message}`, 'DB_ERROR');
+}
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/ai/config
+// Returns the currently stored AI endpoint URL and interval.
+// ─────────────────────────────────────────────────────────────
+router.get('/config', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('system_info')
+      .select('ai_endpoint_url, ai_poll_interval_sec, api_status')
+      .limit(1)
+      .single();
+
+    assertNoError(error, 'ai config');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PUT /api/ai/config
+// Called whenever Cloudflare Tunnel gives a new URL.
+// The poller reads the URL from the DB on every cycle, so the
+// change takes effect on the NEXT scheduled tick automatically.
+//
+// Body: { url: 'https://abc.trycloudflare.com', intervalSec: 30 }
+// ─────────────────────────────────────────────────────────────
+router.put('/config', async (req, res, next) => {
+  try {
+    const { url, intervalSec } = req.body;
+
+    if (!url) return next(createError(400, 'url is required', 'VALIDATION'));
+    if (!/^https?:\/\/.+/.test(url)) {
+      return next(createError(400, 'url must be a valid http/https URL', 'VALIDATION'));
+    }
+
+    const updates = { ai_endpoint_url: url };
+    if (intervalSec && intervalSec >= 5) updates.ai_poll_interval_sec = intervalSec;
+
+    const { data: existing } = await supabase
+      .from('system_info').select('id').limit(1).single();
+
+    const { data, error } = await supabase
+      .from('system_info')
+      .update(updates)
+      .eq('id', existing.id)
+      .select('ai_endpoint_url, ai_poll_interval_sec')
+      .single();
+
+    assertNoError(error, 'update ai config');
+
+    // If interval changed, restart the poller with the new schedule
+    if (intervalSec && intervalSec >= 5) {
+      await aiPoller.restartPoller();
+    }
+
+    console.info(`[AI Config] Updated endpoint URL to: ${url}`);
+    res.json({ success: true, data, message: 'AI endpoint URL updated. Takes effect on next poll cycle.' });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/ai/status
+// Returns the current in-memory poller state.
+// ─────────────────────────────────────────────────────────────
+router.get('/status', (req, res) => {
+  res.json({ success: true, data: aiPoller.getStatus() });
+});
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/ai/fetch
+// Manually trigger one fetch cycle right now.
+// Useful for testing or when you want an immediate update.
+// ─────────────────────────────────────────────────────────────
+router.post('/fetch', async (req, res, next) => {
+  try {
+    await aiPoller.runFetchCycle();
+    res.json({ success: true, data: aiPoller.getStatus(), message: 'Manual fetch cycle completed.' });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/ai/start
+// Start the automatic poller (if not already running).
+// ─────────────────────────────────────────────────────────────
+router.post('/start', async (req, res, next) => {
+  try {
+    await aiPoller.startPoller();
+    res.json({ success: true, data: aiPoller.getStatus(), message: 'Poller started.' });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/ai/stop
+// Stop the automatic poller.
+// ─────────────────────────────────────────────────────────────
+router.post('/stop', (req, res) => {
+  aiPoller.stopPoller();
+  res.json({ success: true, data: aiPoller.getStatus(), message: 'Poller stopped.' });
+});
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/ai/restart
+// Restart the poller (re-reads DB config — useful after
+// updating the URL or interval).
+// ─────────────────────────────────────────────────────────────
+router.post('/restart', async (req, res, next) => {
+  try {
+    await aiPoller.restartPoller();
+    res.json({ success: true, data: aiPoller.getStatus(), message: 'Poller restarted.' });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+
+================================================================================
+FILE: ./src\routes\dashboard.js
+================================================================================
+
+// src/routes/dashboard.js
+// GET /api/dashboard/summary        → fleet-level KPI cards
+// GET /api/dashboard/recent         → latest N violations
+// GET /api/dashboard/top-drivers    → top 3 ranked drivers
+// GET /api/dashboard/bottom-drivers → bottom 3 ranked drivers
+// GET /api/dashboard/weekly-trend   → last 7 days violation counts
+// GET /api/dashboard/violation-mix  → all-time breakdown by type
+
+const express    = require('express');
+const { supabase } = require('../config/supabase');
+const { createError } = require('../middleware/errorHandler');
+
+const router = express.Router();
+
+// ── Helper: throw on Supabase error ──────────────────────────
+function assertNoError(error, label) {
+  if (error) throw createError(500, `DB error (${label}): ${error.message}`, 'DB_ERROR');
+}
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/dashboard/summary
+// Uses the v_dashboard_summary view (single-row aggregate).
+// ─────────────────────────────────────────────────────────────
+router.get('/summary', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('v_dashboard_summary')
+      .select('*')
+      .single();
+
+    assertNoError(error, 'v_dashboard_summary');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/dashboard/recent?limit=5
+// Latest violations with driver name and route context.
+// ─────────────────────────────────────────────────────────────
+router.get('/recent', async (req, res, next) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 5, 20);
+
+    const { data, error } = await supabase
+      .from('v_violations_detail')
+      .select(
+        'id, violation_type, violation_label, driver_name, initials, ' +
+        'avatar_color, route_name, confidence, status, detection_date, ' +
+        'start_time, image_url, bus_number'
+      )
+      .order('inserted_at', { ascending: false })
+      .limit(limit);
+
+    assertNoError(error, 'recent violations');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/dashboard/top-drivers?limit=3
+// Highest-ranked (lowest rank number) active drivers.
+// ─────────────────────────────────────────────────────────────
+router.get('/top-drivers', async (req, res, next) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 3, 10);
+
+    const { data, error } = await supabase
+      .from('v_driver_stats')
+      .select(
+        'id, name, initials, avatar_color, rank, safety_score, ' +
+        'total_violations, route_name, route_type, status'
+      )
+      .eq('status', 'active')
+      .order('rank', { ascending: true })
+      .limit(limit);
+
+    assertNoError(error, 'top drivers');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/dashboard/bottom-drivers?limit=3
+// Lowest-ranked drivers (any status).
+// ─────────────────────────────────────────────────────────────
+router.get('/bottom-drivers', async (req, res, next) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 3, 10);
+
+    const { data, error } = await supabase
+      .from('v_driver_stats')
+      .select(
+        'id, name, initials, avatar_color, rank, safety_score, ' +
+        'total_violations, route_name, route_type, status'
+      )
+      .order('rank', { ascending: false })
+      .limit(limit);
+
+    assertNoError(error, 'bottom drivers');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/dashboard/weekly-trend
+// Last 7 calendar days grouped by date and violation type.
+// Parallel DB query for efficiency.
+// ─────────────────────────────────────────────────────────────
+router.get('/weekly-trend', async (req, res, next) => {
+  try {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+    const from = sevenDaysAgo.toISOString().split('T')[0];
+
+    const { data, error } = await supabase
+      .from('v_daily_violation_trend')
+      .select('detection_date, total, phone, sunglasses, drowsy, smoking')
+      .gte('detection_date', from)
+      .order('detection_date', { ascending: true });
+
+    assertNoError(error, 'weekly trend');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/dashboard/violation-mix
+// All-time violation counts per type (for pie/donut chart).
+// ─────────────────────────────────────────────────────────────
+router.get('/violation-mix', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('v_dashboard_summary')
+      .select('total_phone, total_sunglasses, total_drowsy, total_smoking')
+      .single();
+
+    assertNoError(error, 'violation mix');
+
+    // Shape it for the Recharts PieChart the frontend already uses
+    const shaped = [
+      { name: 'Phone Usage',  value: data.total_phone,      color: '#f97316' },
+      { name: 'Drowsiness',   value: data.total_drowsy,     color: '#ef4444' },
+      { name: 'Sunglasses',   value: data.total_sunglasses, color: '#eab308' },
+      { name: 'Smoking',      value: data.total_smoking,    color: '#a855f7' },
+    ];
+
+    res.json({ success: true, data: shaped });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+
+================================================================================
+FILE: ./src\routes\drivers.js
+================================================================================
+
+// src/routes/drivers.js
+// GET  /api/drivers                  → paginated + filtered list
+// GET  /api/drivers/:id              → full driver profile
+// GET  /api/drivers/:id/violations   → driver's violation history
+// PATCH /api/drivers/:id/status      → update driver status
+// PATCH /api/drivers/:id/assignment  → change driver's route/bus
+
+const express      = require('express');
+const { supabase } = require('../config/supabase');
+const { createError } = require('../middleware/errorHandler');
+
+const router = express.Router();
+
+function assertNoError(error, label) {
+  if (error) throw createError(500, `DB error (${label}): ${error.message}`, 'DB_ERROR');
+}
+
+// Valid enum values (guard against bad query params)
+const VALID_STATUSES    = ['active', 'inactive', 'suspended'];
+const VALID_ROUTE_TYPES = ['demanding', 'moderate', 'simple'];
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/drivers
+// Query params:
+//   status     = active | inactive | suspended
+//   routeType  = demanding | moderate | simple
+//   search     = partial name or license match
+//   sortBy     = rank | safety_score | total_violations | name
+//   order      = asc | desc
+//   page       = 1
+//   limit      = 20
+// ─────────────────────────────────────────────────────────────
+router.get('/', async (req, res, next) => {
+  try {
+    const {
+      status, routeType, search,
+      sortBy = 'rank', order = 'asc',
+      page = 1, limit = 20,
+    } = req.query;
+
+    const pageNum  = Math.max(Number(page),  1);
+    const pageSize = Math.min(Number(limit), 100);
+    const from     = (pageNum - 1) * pageSize;
+    const to       = from + pageSize - 1;
+
+    let query = supabase
+      .from('v_driver_stats')
+      .select(
+        'id, name, license_number, initials, avatar_color, status, ' +
+        'safety_score, rank, total_violations, phone_violations, ' +
+        'sunglasses_violations, drowsiness_violations, smoking_violations, ' +
+        'route_id, route_name, route_type, bus_number, recommended_route_type, ' +
+        'experience_years, join_date, last_active',
+        { count: 'exact' }
+      );
+
+    // Filters
+    if (status && VALID_STATUSES.includes(status)) {
+      query = query.eq('status', status);
+    }
+    if (routeType && VALID_ROUTE_TYPES.includes(routeType)) {
+      query = query.eq('route_type', routeType);
+    }
+    if (search) {
+      query = query.or(`name.ilike.%${search}%,license_number.ilike.%${search}%`);
+    }
+
+    // Sorting
+    const validSortCols = ['rank', 'safety_score', 'total_violations', 'name'];
+    const col = validSortCols.includes(sortBy) ? sortBy : 'rank';
+    query = query.order(col, { ascending: order !== 'desc' });
+
+    // Pagination
+    query = query.range(from, to);
+
+    const { data, error, count } = await query;
+    assertNoError(error, 'drivers list');
+
+    res.json({
+      success : true,
+      data,
+      meta    : { total: count, page: pageNum, limit: pageSize },
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/drivers/:id
+// Full driver profile from v_driver_stats + recent violations.
+// Both queries run in PARALLEL.
+// ─────────────────────────────────────────────────────────────
+router.get('/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    // Run profile + recent violations concurrently
+    const [profileResult, violationsResult] = await Promise.all([
+      supabase
+        .from('v_driver_stats')
+        .select('*')
+        .eq('id', id)
+        .single(),
+      supabase
+        .from('v_violations_detail')
+        .select(
+          'id, violation_type, violation_label, image_url, detection_date, ' +
+          'start_time, end_time, duration_sec, confidence, status, inserted_at'
+        )
+        .eq('driver_id', id)
+        .order('inserted_at', { ascending: false })
+        .limit(50),
+    ]);
+
+    if (profileResult.error?.code === 'PGRST116') {
+      return next(createError(404, 'Driver not found', 'NOT_FOUND'));
+    }
+
+    assertNoError(profileResult.error,    'driver profile');
+    assertNoError(violationsResult.error, 'driver violations');
+
+    res.json({
+      success : true,
+      data    : {
+        ...profileResult.data,
+        recentViolations: violationsResult.data,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/drivers/:id/violations
+// Full paginated violation history for one driver.
+// ─────────────────────────────────────────────────────────────
+router.get('/:id/violations', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { type, status, page = 1, limit = 20 } = req.query;
+
+    const pageNum  = Math.max(Number(page),  1);
+    const pageSize = Math.min(Number(limit), 100);
+    const from     = (pageNum - 1) * pageSize;
+    const to       = from + pageSize - 1;
+
+    let query = supabase
+      .from('v_violations_detail')
+      .select('*', { count: 'exact' })
+      .eq('driver_id', id);
+
+    if (type)   query = query.eq('violation_type', type);
+    if (status) query = query.eq('status', status);
+
+    query = query.order('inserted_at', { ascending: false }).range(from, to);
+
+    const { data, error, count } = await query;
+    assertNoError(error, 'driver violation history');
+
+    res.json({
+      success : true,
+      data,
+      meta    : { total: count, page: pageNum, limit: pageSize },
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PATCH /api/drivers/:id/status
+// Body: { status: 'active' | 'inactive' | 'suspended' }
+// ─────────────────────────────────────────────────────────────
+router.patch('/:id/status', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!VALID_STATUSES.includes(status)) {
+      return next(createError(400, `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}`, 'VALIDATION'));
+    }
+
+    const { data, error } = await supabase
+      .from('drivers')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select('id, name, status')
+      .single();
+
+    if (error?.code === 'PGRST116') return next(createError(404, 'Driver not found', 'NOT_FOUND'));
+    assertNoError(error, 'update driver status');
+
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PATCH /api/drivers/:id/assignment
+// Re-assign a driver to a different route and bus.
+// Body: { routeId: 'uuid', busId: 'uuid' }
+// Deactivates the current assignment and creates a new one.
+// ─────────────────────────────────────────────────────────────
+router.patch('/:id/assignment', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { routeId, busId } = req.body;
+
+    if (!routeId || !busId) {
+      return next(createError(400, 'routeId and busId are required', 'VALIDATION'));
+    }
+
+    // Deactivate current assignment + create new one — in parallel
+    const [deactivate, insert] = await Promise.all([
+      supabase
+        .from('assignments')
+        .update({ status: 'inactive', ended_at: new Date().toISOString() })
+        .eq('driver_id', id)
+        .eq('status', 'active'),
+      supabase
+        .from('assignments')
+        .insert({ driver_id: id, route_id: routeId, bus_id: busId, status: 'active' })
+        .select('id')
+        .single(),
+    ]);
+
+    assertNoError(deactivate.error, 'deactivate old assignment');
+    assertNoError(insert.error,     'create new assignment');
+
+    res.json({ success: true, data: { assignmentId: insert.data.id } });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+
+================================================================================
+FILE: ./src\routes\fleetRoutes.js
+================================================================================
+
+// src/routes/fleetRoutes.js
+// Named "fleetRoutes" to avoid clash with Express Router naming.
+//
+// GET  /api/routes               → all routes with assigned driver
+// GET  /api/routes/:id           → single route detail
+// GET  /api/routes/recommend/:driverId → recommended route for a driver
+// PATCH /api/routes/:id/assign   → assign a driver to a route
+
+const express      = require('express');
+const { supabase } = require('../config/supabase');
+const { createError } = require('../middleware/errorHandler');
+
+const router = express.Router();
+
+function assertNoError(error, label) {
+  if (error) throw createError(500, `DB error (${label}): ${error.message}`, 'DB_ERROR');
+}
+
+const VALID_DIFFICULTIES = ['demanding', 'moderate', 'simple'];
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/routes
+// Query params: difficulty = demanding | moderate | simple
+// ─────────────────────────────────────────────────────────────
+router.get('/', async (req, res, next) => {
+  try {
+    const { difficulty } = req.query;
+
+    let query = supabase
+      .from('v_route_assignments')
+      .select('*');
+
+    if (difficulty && VALID_DIFFICULTIES.includes(difficulty)) {
+      query = query.eq('difficulty', difficulty);
+    }
+
+    query = query.order('difficulty', { ascending: true });
+
+    const { data, error } = await query;
+    assertNoError(error, 'routes list');
+
+    // Also fetch route-level totals from violations — in parallel
+    const routeIds = data.map((r) => r.id);
+    const { data: totals, error: totalsErr } = await supabase
+      .from('detected_violations')
+      .select('bus_id, violation_type')
+      .in(
+        'bus_id',
+        data.map((r) => r.bus_id).filter(Boolean)
+      );
+    // Non-fatal: totals are nice-to-have
+    if (!totalsErr && totals) {
+      const countByBus = {};
+      totals.forEach(({ bus_id }) => {
+        countByBus[bus_id] = (countByBus[bus_id] || 0) + 1;
+      });
+      data.forEach((route) => {
+        route.totalViolationsOnRoute = countByBus[route.bus_id] || 0;
+      });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/routes/:id
+// Single route with assigned driver details.
+// ─────────────────────────────────────────────────────────────
+router.get('/:id', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('v_route_assignments')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (error?.code === 'PGRST116') return next(createError(404, 'Route not found', 'NOT_FOUND'));
+    assertNoError(error, 'route detail');
+
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/routes/recommend/:driverId
+// Returns the recommended route difficulty for a given driver
+// based on their current safety score and the configured thresholds.
+// ─────────────────────────────────────────────────────────────
+router.get('/recommend/:driverId', async (req, res, next) => {
+  try {
+    const { driverId } = req.params;
+
+    // Get driver's current safety score + thresholds in parallel
+    const [driverRes, thresholdsRes] = await Promise.all([
+      supabase
+        .from('drivers')
+        .select('id, name, safety_score')
+        .eq('id', driverId)
+        .single(),
+      supabase
+        .from('route_thresholds')
+        .select('route_type, min_safety_score')
+        .order('min_safety_score', { ascending: false }),
+    ]);
+
+    if (driverRes.error?.code === 'PGRST116') {
+      return next(createError(404, 'Driver not found', 'NOT_FOUND'));
+    }
+    assertNoError(driverRes.error,     'driver for recommendation');
+    assertNoError(thresholdsRes.error, 'route thresholds');
+
+    const { safety_score } = driverRes.data;
+    const thresholds = thresholdsRes.data;
+
+    // Determine recommendation (same logic as DB function)
+    let recommended = 'simple';
+    for (const threshold of thresholds) {
+      if (safety_score >= threshold.min_safety_score) {
+        recommended = threshold.route_type;
+        break;
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        driverId,
+        driverName    : driverRes.data.name,
+        safetyScore   : safety_score,
+        recommended,
+        thresholds,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PATCH /api/routes/:id/assign
+// Assign a driver to a route (and optionally a bus).
+// Body: { driverId: 'uuid', busId: 'uuid' }
+// Deactivates old assignment for both the driver and the bus,
+// then creates a new active one — all in parallel where possible.
+// ─────────────────────────────────────────────────────────────
+router.patch('/:id/assign', async (req, res, next) => {
+  try {
+    const { id: routeId } = req.params;
+    const { driverId, busId } = req.body;
+
+    if (!driverId || !busId) {
+      return next(createError(400, 'driverId and busId are required', 'VALIDATION'));
+    }
+
+    // Deactivate any current active assignments for this driver AND this bus
+    // — run both deactivations in parallel
+    await Promise.all([
+      supabase
+        .from('assignments')
+        .update({ status: 'inactive', ended_at: new Date().toISOString() })
+        .eq('driver_id', driverId)
+        .eq('status', 'active'),
+      supabase
+        .from('assignments')
+        .update({ status: 'inactive', ended_at: new Date().toISOString() })
+        .eq('bus_id', busId)
+        .eq('status', 'active'),
+    ]);
+
+    // Create the new assignment
+    const { data, error } = await supabase
+      .from('assignments')
+      .insert({
+        driver_id : driverId,
+        bus_id    : busId,
+        route_id  : routeId,
+        status    : 'active',
+      })
+      .select('id')
+      .single();
+
+    assertNoError(error, 'create assignment');
+
+    res.json({ success: true, data: { assignmentId: data.id } });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+
+================================================================================
+FILE: ./src\routes\reports.js
+================================================================================
+
+// src/routes/reports.js
+// All analytics queries for the Reports page.
+// Heavy use of Promise.all() — every multi-query endpoint
+// fires all DB calls in parallel.
+//
+// GET /api/reports/kpis                 → top KPI cards
+// GET /api/reports/daily-trend          → daily totals (line chart)
+// GET /api/reports/monthly-comparison   → this month vs last month weekly
+// GET /api/reports/hourly-pattern       → violations by hour (bar chart)
+// GET /api/reports/violation-mix        → type breakdown (pie chart)
+// GET /api/reports/driver-scores        → driver score ranking (bar chart)
+
+const express      = require('express');
+const { supabase } = require('../config/supabase');
+const { createError } = require('../middleware/errorHandler');
+
+const router = express.Router();
+
+function assertNoError(error, label) {
+  if (error) throw createError(500, `DB error (${label}): ${error.message}`, 'DB_ERROR');
+}
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/reports/kpis
+// Total violations, fleet safety score, improved drivers,
+// detection accuracy — all in one parallel call.
+// ─────────────────────────────────────────────────────────────
+router.get('/kpis', async (req, res, next) => {
+  try {
+    const [summaryRes, improvedRes] = await Promise.all([
+      supabase
+        .from('v_dashboard_summary')
+        .select('total_violations, avg_safety_score')
+        .single(),
+      // "Improved" = drivers whose safety score > 70 and status = active
+      supabase
+        .from('drivers')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'active')
+        .gt('safety_score', 70),
+    ]);
+
+    assertNoError(summaryRes.error,  'kpi summary');
+    assertNoError(improvedRes.error, 'improved drivers');
+
+    res.json({
+      success: true,
+      data: {
+        totalViolations  : summaryRes.data.total_violations,
+        fleetSafetyScore : summaryRes.data.avg_safety_score,
+        driversImproved  : improvedRes.count ?? 0,
+        // Detection accuracy is informational; you can wire this
+        // to a real metric when the AI exposes it
+        detectionAccuracy: 94,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/reports/daily-trend?days=30
+// Daily violation counts over the last N days.
+// ─────────────────────────────────────────────────────────────
+router.get('/daily-trend', async (req, res, next) => {
+  try {
+    const days = Math.min(Number(req.query.days) || 30, 365);
+    const from = new Date();
+    from.setDate(from.getDate() - (days - 1));
+    const fromStr = from.toISOString().split('T')[0];
+
+    const { data, error } = await supabase
+      .from('v_daily_violation_trend')
+      .select('detection_date, total, phone, sunglasses, drowsy, smoking')
+      .gte('detection_date', fromStr)
+      .order('detection_date', { ascending: true });
+
+    assertNoError(error, 'daily trend');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/reports/monthly-comparison
+// Current month vs previous month, grouped into weeks.
+// Both month queries fire in parallel.
+// ─────────────────────────────────────────────────────────────
+router.get('/monthly-comparison', async (req, res, next) => {
+  try {
+    const now       = new Date();
+    const thisYear  = now.getFullYear();
+    const thisMonth = now.getMonth() + 1; // 1-based
+
+    // First day of this month and last month
+    const thisMonthStart = `${thisYear}-${String(thisMonth).padStart(2,'0')}-01`;
+    const lastMonth      = thisMonth === 1 ? 12 : thisMonth - 1;
+    const lastMonthYear  = thisMonth === 1 ? thisYear - 1 : thisYear;
+    const lastMonthStart = `${lastMonthYear}-${String(lastMonth).padStart(2,'0')}-01`;
+    const lastMonthEnd   = new Date(thisYear, thisMonth - 1, 0)
+      .toISOString().split('T')[0]; // last day of previous month
+
+    const [thisMonthRes, lastMonthRes] = await Promise.all([
+      supabase
+        .from('v_daily_violation_trend')
+        .select('detection_date, total')
+        .gte('detection_date', thisMonthStart)
+        .order('detection_date', { ascending: true }),
+      supabase
+        .from('v_daily_violation_trend')
+        .select('detection_date, total')
+        .gte('detection_date', lastMonthStart)
+        .lte('detection_date', lastMonthEnd)
+        .order('detection_date', { ascending: true }),
+    ]);
+
+    assertNoError(thisMonthRes.error, 'this month trend');
+    assertNoError(lastMonthRes.error, 'last month trend');
+
+    res.json({
+      success: true,
+      data: {
+        thisMonth: thisMonthRes.data,
+        lastMonth: lastMonthRes.data,
+      },
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/reports/hourly-pattern
+// At which hours do most violations occur?
+// ─────────────────────────────────────────────────────────────
+router.get('/hourly-pattern', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('v_hourly_violation_pattern')
+      .select('hour, total_violations, phone, sunglasses, drowsy, smoking');
+
+    assertNoError(error, 'hourly pattern');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/reports/violation-mix
+// All-time percentage breakdown by type.
+// ─────────────────────────────────────────────────────────────
+router.get('/violation-mix', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('v_dashboard_summary')
+      .select('total_violations, total_phone, total_sunglasses, total_drowsy, total_smoking')
+      .single();
+
+    assertNoError(error, 'violation mix');
+
+    const total = data.total_violations || 1; // avoid divide-by-zero
+    const shaped = [
+      { name: 'Phone Usage',  value: data.total_phone,      pct: +((data.total_phone      / total) * 100).toFixed(1), color: '#f97316' },
+      { name: 'Drowsiness',   value: data.total_drowsy,     pct: +((data.total_drowsy     / total) * 100).toFixed(1), color: '#ef4444' },
+      { name: 'Sunglasses',   value: data.total_sunglasses, pct: +((data.total_sunglasses / total) * 100).toFixed(1), color: '#eab308' },
+      { name: 'Smoking',      value: data.total_smoking,    pct: +((data.total_smoking    / total) * 100).toFixed(1), color: '#a855f7' },
+    ];
+
+    res.json({ success: true, data: shaped });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/reports/driver-scores
+// All drivers ranked by safety score for the bar chart.
+// ─────────────────────────────────────────────────────────────
+router.get('/driver-scores', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('v_driver_stats')
+      .select('id, name, initials, avatar_color, safety_score, rank, total_violations, route_type')
+      .order('safety_score', { ascending: false });
+
+    assertNoError(error, 'driver scores');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+
+================================================================================
+FILE: ./src\routes\settings.js
+================================================================================
+
+// src/routes/settings.js
+// GET  /api/settings/all            → all settings in one parallel call
+// GET  /api/settings/detection      → detection module settings
+// PUT  /api/settings/detection      → update detection settings (bulk)
+// GET  /api/settings/route-thresholds
+// PUT  /api/settings/route-thresholds
+// GET  /api/settings/notifications
+// PUT  /api/settings/notifications
+// GET  /api/settings/camera
+// PUT  /api/settings/camera
+// GET  /api/settings/system
+
+const express         = require('express');
+const { supabase }    = require('../config/supabase');
+const { restartPoller } = require('../services/aiPoller');
+const { createError } = require('../middleware/errorHandler');
+
+const router = express.Router();
+
+function assertNoError(error, label) {
+  if (error) throw createError(500, `DB error (${label}): ${error.message}`, 'DB_ERROR');
+}
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/settings/all
+// Fetches ALL settings tables in parallel — single round-trip
+// latency for the Settings page initial load.
+// ─────────────────────────────────────────────────────────────
+router.get('/all', async (req, res, next) => {
+  try {
+    const [detection, thresholds, notifications, camera, system] = await Promise.all([
+      supabase.from('detection_settings')   .select('*'),
+      supabase.from('route_thresholds')     .select('*').order('min_safety_score', { ascending: false }),
+      supabase.from('notification_settings').select('*').limit(1).single(),
+      supabase.from('camera_settings')      .select('*').limit(1).single(),
+      supabase.from('system_info')          .select('system_version, ai_model_version, api_status, ai_endpoint_url, ai_poll_interval_sec, last_health_check').limit(1).single(),
+    ]);
+
+    // Non-fatal: collect errors and report them alongside data
+    const errors = [
+      detection.error, thresholds.error, notifications.error,
+      camera.error, system.error,
+    ].filter(Boolean).map((e) => e.message);
+
+    res.json({
+      success : errors.length === 0,
+      data: {
+        detection     : detection.data,
+        thresholds    : thresholds.data,
+        notifications : notifications.data,
+        camera        : camera.data,
+        system        : system.data,
+      },
+      errors: errors.length ? errors : undefined,
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/settings/detection
+// ─────────────────────────────────────────────────────────────
+router.get('/detection', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('detection_settings')
+      .select('*');
+    assertNoError(error, 'detection settings');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PUT /api/settings/detection
+// Bulk-update all detection module settings in one upsert.
+// Body: [{ module_name, is_enabled, confidence_threshold }, ...]
+// ─────────────────────────────────────────────────────────────
+router.put('/detection', async (req, res, next) => {
+  try {
+    const settings = req.body;
+    if (!Array.isArray(settings)) {
+      return next(createError(400, 'Body must be an array of detection settings', 'VALIDATION'));
+    }
+
+    const { data, error } = await supabase
+      .from('detection_settings')
+      .upsert(settings, { onConflict: 'module_name' })
+      .select('*');
+
+    assertNoError(error, 'update detection settings');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/settings/route-thresholds
+// ─────────────────────────────────────────────────────────────
+router.get('/route-thresholds', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('route_thresholds')
+      .select('*')
+      .order('min_safety_score', { ascending: false });
+    assertNoError(error, 'route thresholds');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PUT /api/settings/route-thresholds
+// Body: [{ route_type, min_safety_score }, ...]
+// ─────────────────────────────────────────────────────────────
+router.put('/route-thresholds', async (req, res, next) => {
+  try {
+    const thresholds = req.body;
+    if (!Array.isArray(thresholds)) {
+      return next(createError(400, 'Body must be an array of thresholds', 'VALIDATION'));
+    }
+
+    const { data, error } = await supabase
+      .from('route_thresholds')
+      .upsert(thresholds, { onConflict: 'route_type' })
+      .select('*');
+
+    assertNoError(error, 'update route thresholds');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/settings/notifications
+// ─────────────────────────────────────────────────────────────
+router.get('/notifications', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('notification_settings')
+      .select('*')
+      .limit(1)
+      .single();
+    assertNoError(error, 'notification settings');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PUT /api/settings/notifications
+// Body: { alert_sound, email_alerts, sms_alerts, auto_flag, auto_suspend_threshold }
+// ─────────────────────────────────────────────────────────────
+router.put('/notifications', async (req, res, next) => {
+  try {
+    const { alert_sound, email_alerts, sms_alerts, auto_flag, auto_suspend_threshold } = req.body;
+
+    // Get the existing row's id first
+    const { data: existing, error: fetchErr } = await supabase
+      .from('notification_settings')
+      .select('id')
+      .limit(1)
+      .single();
+    assertNoError(fetchErr, 'fetch notification settings id');
+
+    const { data, error } = await supabase
+      .from('notification_settings')
+      .update({ alert_sound, email_alerts, sms_alerts, auto_flag, auto_suspend_threshold })
+      .eq('id', existing.id)
+      .select('*')
+      .single();
+
+    assertNoError(error, 'update notification settings');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/settings/camera
+// ─────────────────────────────────────────────────────────────
+router.get('/camera', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('camera_settings')
+      .select('*')
+      .limit(1)
+      .single();
+    assertNoError(error, 'camera settings');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PUT /api/settings/camera
+// Body: { resolution, frame_rate, retention_days, capture_on_detection }
+// ─────────────────────────────────────────────────────────────
+router.put('/camera', async (req, res, next) => {
+  try {
+    const { resolution, frame_rate, retention_days, capture_on_detection } = req.body;
+
+    const { data: existing } = await supabase
+      .from('camera_settings').select('id').limit(1).single();
+
+    const { data, error } = await supabase
+      .from('camera_settings')
+      .update({ resolution, frame_rate, retention_days, capture_on_detection })
+      .eq('id', existing.id)
+      .select('*')
+      .single();
+
+    assertNoError(error, 'update camera settings');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/settings/system
+// ─────────────────────────────────────────────────────────────
+router.get('/system', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('system_info')
+      .select('system_version, ai_model_version, api_status, ai_endpoint_url, ai_poll_interval_sec, last_health_check')
+      .limit(1)
+      .single();
+    assertNoError(error, 'system info');
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PUT /api/settings/poll-interval
+// Update the AI poll interval and restart the poller.
+// Body: { intervalSec: 30 }
+// ─────────────────────────────────────────────────────────────
+router.put('/poll-interval', async (req, res, next) => {
+  try {
+    const { intervalSec } = req.body;
+    if (!intervalSec || intervalSec < 5) {
+      return next(createError(400, 'intervalSec must be >= 5', 'VALIDATION'));
+    }
+
+    const { data: existing } = await supabase
+      .from('system_info').select('id').limit(1).single();
+
+    const { error } = await supabase
+      .from('system_info')
+      .update({ ai_poll_interval_sec: intervalSec })
+      .eq('id', existing.id);
+
+    assertNoError(error, 'update poll interval');
+
+    // Restart poller with the new interval
+    await restartPoller();
+
+    res.json({ success: true, data: { intervalSec } });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+
+================================================================================
+FILE: ./src\routes\violations.js
+================================================================================
+
+// src/routes/violations.js
+// GET   /api/violations                → paginated log with filters
+// GET   /api/violations/:id            → single violation detail
+// PATCH /api/violations/:id            → update one violation's status/notes
+// PATCH /api/violations/bulk           → bulk status update
+
+const express      = require('express');
+const { supabase } = require('../config/supabase');
+const { createError } = require('../middleware/errorHandler');
+
+const router = express.Router();
+
+function assertNoError(error, label) {
+  if (error) throw createError(500, `DB error (${label}): ${error.message}`, 'DB_ERROR');
+}
+
+const VALID_STATUSES = ['pending', 'reviewed', 'flagged'];
+const VALID_TYPES    = ['mobile', 'sunglasses', 'drowsy', 'smoking'];
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/violations
+// Query params:
+//   type       = mobile | sunglasses | drowsy | smoking
+//   status     = pending | reviewed | flagged
+//   driverName = partial match
+//   dateFrom   = YYYY-MM-DD
+//   dateTo     = YYYY-MM-DD
+//   page, limit
+// ─────────────────────────────────────────────────────────────
+router.get('/', async (req, res, next) => {
+  try {
+    const {
+      type, status, driverName,
+      dateFrom, dateTo,
+      page = 1, limit = 20,
+    } = req.query;
+
+    const pageNum  = Math.max(Number(page),  1);
+    const pageSize = Math.min(Number(limit), 100);
+    const from     = (pageNum - 1) * pageSize;
+    const to       = from + pageSize - 1;
+
+    let query = supabase
+      .from('v_violations_detail')
+      .select('*', { count: 'exact' });
+
+    if (type       && VALID_TYPES.includes(type))       query = query.eq('violation_type', type);
+    if (status     && VALID_STATUSES.includes(status))  query = query.eq('status', status);
+    if (driverName) query = query.ilike('driver_name', `%${driverName}%`);
+    if (dateFrom)   query = query.gte('detection_date', dateFrom);
+    if (dateTo)     query = query.lte('detection_date', dateTo);
+
+    query = query
+      .order('inserted_at', { ascending: false })
+      .range(from, to);
+
+    const { data, error, count } = await query;
+    assertNoError(error, 'violations list');
+
+    res.json({
+      success : true,
+      data,
+      meta    : { total: count, page: pageNum, limit: pageSize },
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/violations/:id
+// Single violation with full driver + route context.
+// ─────────────────────────────────────────────────────────────
+router.get('/:id', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('v_violations_detail')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (error?.code === 'PGRST116') return next(createError(404, 'Violation not found', 'NOT_FOUND'));
+    assertNoError(error, 'violation detail');
+
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PATCH /api/violations/:id
+// Body: { status, notes, reviewedBy }
+// ─────────────────────────────────────────────────────────────
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const { status, notes, reviewedBy } = req.body;
+
+    if (status && !VALID_STATUSES.includes(status)) {
+      return next(createError(400, `Invalid status. Must be: ${VALID_STATUSES.join(', ')}`, 'VALIDATION'));
+    }
+
+    const updates = {};
+    if (status)     { updates.status      = status; }
+    if (notes)      { updates.notes       = notes; }
+    if (reviewedBy) {
+      updates.reviewed_by = reviewedBy;
+      updates.reviewed_at = new Date().toISOString();
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return next(createError(400, 'No updatable fields provided', 'VALIDATION'));
+    }
+
+    const { data, error } = await supabase
+      .from('detected_violations')
+      .update(updates)
+      .eq('id', req.params.id)
+      .select('id, status, reviewed_by, reviewed_at')
+      .single();
+
+    if (error?.code === 'PGRST116') return next(createError(404, 'Violation not found', 'NOT_FOUND'));
+    assertNoError(error, 'update violation');
+
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// PATCH /api/violations/bulk
+// Bulk-update status for multiple violations in ONE DB call.
+// Body: { ids: ['uuid', ...], status: 'reviewed', reviewedBy: 'Admin' }
+// ─────────────────────────────────────────────────────────────
+router.patch('/bulk', async (req, res, next) => {
+  try {
+    const { ids, status, reviewedBy } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return next(createError(400, 'ids must be a non-empty array', 'VALIDATION'));
+    }
+    if (!VALID_STATUSES.includes(status)) {
+      return next(createError(400, `Invalid status. Must be: ${VALID_STATUSES.join(', ')}`, 'VALIDATION'));
+    }
+
+    const updates = {
+      status,
+      reviewed_by: reviewedBy || null,
+      reviewed_at: status === 'reviewed' ? new Date().toISOString() : null,
+    };
+
+    const { data, error } = await supabase
+      .from('detected_violations')
+      .update(updates)
+      .in('id', ids)
+      .select('id, status');
+
+    assertNoError(error, 'bulk update violations');
+
+    res.json({
+      success  : true,
+      data     : { updated: data?.length ?? 0 },
+    });
+  } catch (err) { next(err); }
+});
+
+module.exports = router;
+
+
+================================================================================
+FILE: ./src\services\aiPoller.js
+================================================================================
+
+// src/services/aiPoller.js
+// ─────────────────────────────────────────────────────────────
+// Periodically fetches the AI JSON from the Cloudflare Tunnel
+// URL and passes the response to the violation processor.
+//
+// Key design decisions:
+//  • The AI URL is read from the DB (system_info) before EVERY
+//    fetch cycle, so changing it via PUT /api/ai/config takes
+//    effect immediately — no server restart needed.
+//  • The poll interval is also stored in the DB and re-read
+//    each cycle, so the admin can tune it at runtime.
+//  • All state (lastFetch, lastError, stats) is held in memory
+//    and exposed via getStatus() for the /api/ai/status route.
+// ─────────────────────────────────────────────────────────────
+
+const axios                 = require('axios');
+const { supabase }          = require('../config/supabase');
+const { processAIResponse } = require('./violationProcessor');
+
+// node-cron is loaded lazily inside startPoller() to avoid
+// crashing Vercel serverless (which never calls startPoller).
+let cron = null;
+
+// ── In-memory poller state ────────────────────────────────────
+let cronJob      = null;
+let isRunning    = false;
+let lastFetchAt  = null;
+let lastError    = null;
+let fetchCount   = 0;
+let totalInserted = 0;
+
+// ─────────────────────────────────────────────────────────────
+// Fetch the AI endpoint URL and poll interval from the DB.
+// Falls back to .env values if the DB row has no URL set yet.
+// ─────────────────────────────────────────────────────────────
+async function loadAIConfig() {
+  const { data, error } = await supabase
+    .from('system_info')
+    .select('ai_endpoint_url, ai_poll_interval_sec')
+    .limit(1)
+    .single();
+
+  if (error) {
+    console.warn('[Poller] Could not read system_info, using .env fallback');
+  }
+
+  return {
+    url      : data?.ai_endpoint_url      || process.env.AI_ENDPOINT_URL,
+    interval : data?.ai_poll_interval_sec || Number(process.env.AI_POLL_INTERVAL_SEC) || 30,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// Core fetch-and-process cycle.
+// Called by the cron job on every tick.
+// ─────────────────────────────────────────────────────────────
+async function runFetchCycle() {
+  let config;
+  try {
+    config = await loadAIConfig();
+  } catch (err) {
+    lastError = `Config load failed: ${err.message}`;
+    return;
+  }
+
+  if (!config.url) {
+    lastError = 'No AI endpoint URL configured. Use PUT /api/ai/config to set it.';
+    console.warn('[Poller]', lastError);
+    return;
+  }
+
+  try {
+    console.info(`[Poller] Fetching AI output from: ${config.url}`);
+
+    const response = await axios.get(config.url, {
+      timeout: 10_000, // 10 s – AI should respond quickly
+      headers: { Accept: 'application/json' },
+    });
+
+    const aiJson = response.data;
+
+    if (!aiJson || typeof aiJson !== 'object') {
+      throw new Error('AI response is not a valid JSON object');
+    }
+
+    const summary = await processAIResponse(aiJson);
+
+    // Update poller state
+    fetchCount++;
+    lastFetchAt    = new Date().toISOString();
+    lastError      = null;
+    totalInserted += summary.inserted;
+
+    console.info(
+      `[Poller] Cycle #${fetchCount} done — ` +
+      `processed: ${summary.processed}, inserted: ${summary.inserted}, ` +
+      `skipped: ${summary.skipped}, duplicates: ${summary.duplicates}`
+    );
+
+  } catch (err) {
+    lastError = err.message;
+    console.error('[Poller] Fetch cycle failed:', err.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Build a cron expression from an interval in seconds.
+// node-cron minimum resolution is 1 second.
+// ─────────────────────────────────────────────────────────────
+function buildCronExpression(intervalSec) {
+  // For intervals >= 60 s use minute-based cron, else second-based
+  if (intervalSec >= 60) {
+    const mins = Math.floor(intervalSec / 60);
+    return `*/${mins} * * * *`; // every N minutes
+  }
+  return `*/${intervalSec} * * * * *`; // every N seconds
+}
+
+// ─────────────────────────────────────────────────────────────
+// Start the poller.
+// Reads the interval from the DB, creates the cron job,
+// and runs an immediate first fetch.
+// ─────────────────────────────────────────────────────────────
+async function startPoller() {
+  if (isRunning) {
+    console.info('[Poller] Already running.');
+    return;
+  }
+
+  // Lazy-load node-cron only when actually starting the poller
+  if (!cron) {
+    cron = require('node-cron');
+  }
+
+  const config = await loadAIConfig();
+  const expr   = buildCronExpression(config.interval);
+
+  console.info(`[Poller] Starting — interval: ${config.interval}s (cron: "${expr}")`);
+
+  cronJob = cron.schedule(expr, runFetchCycle, {
+    scheduled : true,
+    timezone  : 'UTC',
+  });
+
+  isRunning = true;
+
+  // Run immediately so we don't wait for the first cron tick
+  runFetchCycle();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Stop the poller.
+// ─────────────────────────────────────────────────────────────
+function stopPoller() {
+  if (!isRunning || !cronJob) {
+    console.info('[Poller] Not running.');
+    return;
+  }
+  cronJob.stop();
+  cronJob   = null;
+  isRunning = false;
+  console.info('[Poller] Stopped.');
+}
+
+// ─────────────────────────────────────────────────────────────
+// Restart with a new interval (called after settings update).
+// ─────────────────────────────────────────────────────────────
+async function restartPoller() {
+  stopPoller();
+  await startPoller();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Status snapshot — returned by GET /api/ai/status
+// ─────────────────────────────────────────────────────────────
+function getStatus() {
+  return {
+    isRunning,
+    lastFetchAt,
+    lastError,
+    fetchCount,
+    totalInserted,
+  };
+}
+
+module.exports = {
+  startPoller,
+  stopPoller,
+  restartPoller,
+  runFetchCycle, // exposed for manual trigger via POST /api/ai/fetch
+  getStatus,
+};
+
+
+================================================================================
+FILE: ./src\services\violationProcessor.js
+================================================================================
+
+// src/services/violationProcessor.js
+// ─────────────────────────────────────────────────────────────
+// The most important service in Vision Guard.
+// Receives the raw AI JSON, resolves every source to a driver
+// IN PARALLEL, then bulk-inserts all valid violations in a
+// single DB round-trip.
+//
+// AI JSON shape (one or many sources):
+// {
+//   "WEBCAM-01": {
+//     "source_id": "WEBCAM-01",
+//     "latest_violation": {
+//       "label": "USING CELL PHONE / AIR BUDS",
+//       "raw_label": "mobile",
+//       "start_time": "20:25:54",
+//       "end_time":   "20:25:57",
+//       "duration_sec": 2.09,
+//       "image_name": "WEBCAM-01_0018.jpg",
+//       "image_url":  "http://..."
+//     }
+//   },
+//   "WEBCAM-02": { ... }
+// }
+// ─────────────────────────────────────────────────────────────
+
+const { supabase } = require('../config/supabase');
+
+// ── Raw AI label → DB enum (violation_type) ──────────────────
+// Handles whatever string the AI might return in raw_label.
+const RAW_LABEL_MAP = {
+  mobile       : 'mobile',
+  phone        : 'mobile',
+  'cell phone' : 'mobile',
+  airbuds      : 'mobile',
+  sunglasses   : 'sunglasses',
+  'sun glasses': 'sunglasses',
+  glasses      : 'sunglasses',
+  drowsy       : 'drowsy',
+  drowsiness   : 'drowsy',
+  sleeping     : 'drowsy',
+  sleep        : 'drowsy',
+  smoking      : 'smoking',
+  cigarette    : 'smoking',
+  smoke        : 'smoking',
+};
+
+function normalizeViolationType(rawLabel = '') {
+  return RAW_LABEL_MAP[rawLabel.toLowerCase().trim()] || null;
+}
+
+// ── Today's date in YYYY-MM-DD ────────────────────────────────
+function todayDate() {
+  return new Date().toISOString().split('T')[0];
+}
+
+// ─────────────────────────────────────────────────────────────
+// STEP 1 – Load ALL detection settings in one query.
+//          Returns a Map: violation_type → { is_enabled, confidence_threshold }
+// ─────────────────────────────────────────────────────────────
+async function loadDetectionSettings() {
+  const { data, error } = await supabase
+    .from('detection_settings')
+    .select('module_name, is_enabled, confidence_threshold');
+
+  if (error) throw new Error(`Failed to load detection settings: ${error.message}`);
+
+  const map = new Map();
+  for (const row of data) map.set(row.module_name, row);
+  return map;
+}
+
+// ─────────────────────────────────────────────────────────────
+// STEP 2 – Resolve source_id → { driver_id, bus_id }
+//          Uses the DB function resolve_driver_from_source()
+//          which does:  buses ← assignments → driver
+//          Returns null if no active assignment found.
+// ─────────────────────────────────────────────────────────────
+async function resolveDriver(sourceId) {
+  const { data, error } = await supabase
+    .rpc('resolve_driver_from_source', { p_source_id: sourceId });
+
+  if (error) {
+    console.warn(`[Processor] Could not resolve driver for source "${sourceId}": ${error.message}`);
+    return null;
+  }
+  return data?.[0] || null; // { driver_id, bus_id }
+}
+
+// ─────────────────────────────────────────────────────────────
+// STEP 3 – Validate and build a single violation record.
+//          Returns null if the violation should be skipped.
+// ─────────────────────────────────────────────────────────────
+function buildRecord(sourceData, resolved, detectionSettings, detectionDate) {
+  const lv = sourceData.latest_violation;
+  if (!lv) return null; // source has no current violation
+
+  const violationType = normalizeViolationType(lv.raw_label);
+  if (!violationType) {
+    console.warn(`[Processor] Unknown raw_label "${lv.raw_label}" from ${sourceData.source_id}`);
+    return null;
+  }
+
+  // Check if this module is enabled
+  const setting = detectionSettings.get(violationType);
+  if (!setting?.is_enabled) return null;
+
+  // Check confidence threshold (AI may or may not provide confidence)
+  if (lv.confidence !== undefined && lv.confidence < setting.confidence_threshold) {
+    console.info(
+      `[Processor] Skipping low-confidence detection: ${lv.confidence} < ${setting.confidence_threshold}`
+    );
+    return null;
+  }
+
+  return {
+    source_id       : sourceData.source_id,
+    bus_id          : resolved?.bus_id    || null,
+    driver_id       : resolved?.driver_id || null,
+    violation_label : lv.label,
+    violation_type  : violationType,
+    image_name      : lv.image_name,
+    image_url       : lv.image_url,
+    detection_date  : detectionDate,
+    start_time      : lv.start_time,   // "HH:MM:SS" from AI
+    end_time        : lv.end_time,
+    duration_sec    : lv.duration_sec,
+    confidence      : lv.confidence ?? null,
+    status          : 'pending',
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// STEP 4 – Bulk-insert records.
+//          Uses ignoreDuplicates so re-polling the same event
+//          (same source + date + start_time + type) is harmless.
+// ─────────────────────────────────────────────────────────────
+async function bulkInsertViolations(records) {
+  if (records.length === 0) return { inserted: 0 };
+
+  const { data, error } = await supabase
+    .from('detected_violations')
+    .upsert(records, {
+      onConflict     : 'source_id,detection_date,start_time,violation_type',
+      ignoreDuplicates: true,
+    })
+    .select('id');
+
+  if (error) throw new Error(`Bulk insert failed: ${error.message}`);
+
+  return { inserted: data?.length ?? 0 };
+}
+
+// ─────────────────────────────────────────────────────────────
+// MAIN EXPORT – processAIResponse(aiJson)
+// ─────────────────────────────────────────────────────────────
+// aiJson is the full parsed JSON body from the AI endpoint.
+// Returns a summary object for logging.
+// ─────────────────────────────────────────────────────────────
+async function processAIResponse(aiJson) {
+  const sources = Object.values(aiJson); // array of source objects
+  if (sources.length === 0) return { processed: 0, inserted: 0, skipped: 0 };
+
+  const detectionDate = todayDate();
+
+  // ── Load settings + resolve all drivers IN PARALLEL ──────────
+  const [detectionSettings, resolvedList] = await Promise.all([
+    loadDetectionSettings(),
+    // Resolve every source concurrently – one DB call per source
+    Promise.all(sources.map((src) => resolveDriver(src.source_id))),
+  ]);
+
+  // ── Build records (synchronous, no DB calls) ──────────────────
+  const records = [];
+  let skipped = 0;
+
+  sources.forEach((src, idx) => {
+    const resolved = resolvedList[idx];
+    const record = buildRecord(src, resolved, detectionSettings, detectionDate);
+    if (record) {
+      records.push(record);
+    } else {
+      skipped++;
+    }
+  });
+
+  // ── Bulk insert (single DB round-trip) ────────────────────────
+  const { inserted } = await bulkInsertViolations(records);
+
+  return {
+    processed : sources.length,
+    inserted,
+    skipped,
+    duplicates: records.length - inserted,
+  };
+}
+
+module.exports = { processAIResponse };
