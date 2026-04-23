@@ -7,25 +7,25 @@
 
 require('dotenv').config();
 
-const express    = require('express');
-const cors       = require('cors');
-const helmet     = require('helmet');
-const morgan     = require('morgan');
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
 
-const { errorHandler }  = require('./middleware/errorHandler');
-const { startPoller }   = require('./services/aiPoller');
+const { errorHandler } = require('./middleware/errorHandler');
+const { startPoller } = require('./services/aiPoller');
 
 // ── Route modules ─────────────────────────────────────────────
-const dashboardRoutes  = require('./routes/dashboard');
-const driverRoutes     = require('./routes/drivers');
-const violationRoutes  = require('./routes/violations');
-const fleetRoutes      = require('./routes/fleetRoutes');
-const reportRoutes     = require('./routes/reports');
-const settingRoutes    = require('./routes/settings');
-const aiRoutes         = require('./routes/ai');
+const dashboardRoutes = require('./routes/dashboard');
+const driverRoutes = require('./routes/drivers');
+const violationRoutes = require('./routes/violations');
+const fleetRoutes = require('./routes/fleetRoutes');
+const reportRoutes = require('./routes/reports');
+const settingRoutes = require('./routes/settings');
+const aiRoutes = require('./routes/ai');
 
 // ─────────────────────────────────────────────────────────────
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ── Security & parsing middleware ─────────────────────────────
@@ -34,8 +34,8 @@ app.use(helmet());
 // Sanitize CORS origin (Vercel env vars sometimes contain trailing whitespace)
 const corsOrigin = (process.env.CORS_ORIGIN || 'http://localhost:5173').trim();
 app.use(cors({
-  origin      : corsOrigin.includes(',') ? corsOrigin.split(',').map(s => s.trim()) : corsOrigin,
-  credentials : true,
+  origin: corsOrigin.includes(',') ? corsOrigin.split(',').map(s => s.trim()) : corsOrigin,
+  credentials: true,
 }));
 app.use(express.json({ limit: '2mb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
@@ -43,20 +43,20 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 // ── Health check (no auth needed) ────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
-    status    : 'ok',
-    service   : 'Vision Guard API',
-    timestamp : new Date().toISOString(),
+    status: 'ok',
+    service: 'Vision Guard API',
+    timestamp: new Date().toISOString(),
   });
 });
 
 // ── API routes ────────────────────────────────────────────────
-app.use('/api/dashboard',  dashboardRoutes);
-app.use('/api/drivers',    driverRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/drivers', driverRoutes);
 app.use('/api/violations', violationRoutes);
-app.use('/api/routes',     fleetRoutes);
-app.use('/api/reports',    reportRoutes);
-app.use('/api/settings',   settingRoutes);
-app.use('/api/ai',         aiRoutes);
+app.use('/api/routes', fleetRoutes);
+app.use('/api/reports', reportRoutes);
+app.use('/api/settings', settingRoutes);
+app.use('/api/ai', aiRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────
 app.use((req, res) => {
