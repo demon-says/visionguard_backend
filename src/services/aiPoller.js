@@ -14,9 +14,12 @@
 // ─────────────────────────────────────────────────────────────
 
 const axios                 = require('axios');
-const cron                  = require('node-cron');
 const { supabase }          = require('../config/supabase');
 const { processAIResponse } = require('./violationProcessor');
+
+// node-cron is loaded lazily inside startPoller() to avoid
+// crashing Vercel serverless (which never calls startPoller).
+let cron = null;
 
 // ── In-memory poller state ────────────────────────────────────
 let cronJob      = null;
@@ -122,6 +125,11 @@ async function startPoller() {
   if (isRunning) {
     console.info('[Poller] Already running.');
     return;
+  }
+
+  // Lazy-load node-cron only when actually starting the poller
+  if (!cron) {
+    cron = require('node-cron');
   }
 
   const config = await loadAIConfig();
