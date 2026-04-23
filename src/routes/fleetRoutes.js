@@ -39,24 +39,44 @@ router.get('/', async (req, res, next) => {
     const { data, error } = await query;
     assertNoError(error, 'routes list');
 
-    // Also fetch route-level totals from violations — in parallel
-    const routeIds = data.map((r) => r.id);
-    const { data: totals, error: totalsErr } = await supabase
-      .from('detected_violations')
-      .select('bus_id, violation_type')
-      .in(
-        'bus_id',
-        data.map((r) => r.bus_id).filter(Boolean)
-      );
-    // Non-fatal: totals are nice-to-have
-    if (!totalsErr && totals) {
-      const countByBus = {};
-      totals.forEach(({ bus_id }) => {
-        countByBus[bus_id] = (countByBus[bus_id] || 0) + 1;
-      });
-      data.forEach((route) => {
-        route.totalViolationsOnRoute = countByBus[route.bus_id] || 0;
-      });
+    // The view doesn't include bus_id, only source_id.
+    // Resolve bus_id from the buses table so the frontend can reassign.
+    const sourceIds = data.map((r) => r.source_id).filter(Boolean);
+    let busMap = {};
+    if (sourceIds.length > 0) {
+      const { data: buses } = await supabase
+        .from('buses')
+        .select('id, source_id')
+        .in('source_id', sourceIds);
+      if (buses) {
+        buses.forEach((b) => { busMap[b.source_id] = b.id; });
+      }
+    }
+
+    // Enrich each route with bus_id
+    data.forEach((route) => {
+      if (!route.bus_id && route.source_id) {
+        route.bus_id = busMap[route.source_id] || null;
+      }
+    });
+
+    // Also fetch route-level totals from violations
+    const busIds = data.map((r) => r.bus_id).filter(Boolean);
+    if (busIds.length > 0) {
+      const { data: totals, error: totalsErr } = await supabase
+        .from('detected_violations')
+        .select('bus_id, violation_type')
+        .in('bus_id', busIds);
+      // Non-fatal: totals are nice-to-have
+      if (!totalsErr && totals) {
+        const countByBus = {};
+        totals.forEach(({ bus_id }) => {
+          countByBus[bus_id] = (countByBus[bus_id] || 0) + 1;
+        });
+        data.forEach((route) => {
+          route.totalViolationsOnRoute = countByBus[route.bus_id] || 0;
+        });
+      }
     }
 
     res.json({ success: true, data });
