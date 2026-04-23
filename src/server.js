@@ -21,8 +21,10 @@ const driverRoutes = require('./routes/drivers');
 const violationRoutes = require('./routes/violations');
 const fleetRoutes = require('./routes/fleetRoutes');
 const reportRoutes = require('./routes/reports');
-const settingRoutes = require('./routes/settings');
-const aiRoutes = require('./routes/ai');
+const settingRoutes    = require('./routes/settings');
+const aiRoutes         = require('./routes/ai');
+const penaltyRoutes    = require('./routes/penalties');
+const fineAmountRoutes = require('./routes/fineAmounts');
 
 // ─────────────────────────────────────────────────────────────
 const app = express();
@@ -57,6 +59,8 @@ app.use('/api/routes', fleetRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/settings', settingRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/penalties',    penaltyRoutes);
+app.use('/api/fine-amounts', fineAmountRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────
 app.use((req, res) => {
@@ -107,6 +111,8 @@ if (!process.env.VERCEL) {
     console.log('   GET  /api/settings/all');
     console.log('   PUT  /api/ai/config   ← update Cloudflare Tunnel URL here');
     console.log('   GET  /api/ai/status');
+    console.log('   POST /api/penalties/:violationId');
+    console.log('   GET  /api/fine-amounts');
     console.log('');
   });
 }

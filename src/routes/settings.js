@@ -28,18 +28,19 @@ function assertNoError(error, label) {
 // ─────────────────────────────────────────────────────────────
 router.get('/all', async (req, res, next) => {
   try {
-    const [detection, thresholds, notifications, camera, system] = await Promise.all([
+    const [detection, thresholds, notifications, camera, system, fineAmounts] = await Promise.all([
       supabase.from('detection_settings')   .select('*'),
       supabase.from('route_thresholds')     .select('*').order('min_safety_score', { ascending: false }),
       supabase.from('notification_settings').select('*').limit(1).single(),
       supabase.from('camera_settings')      .select('*').limit(1).single(),
       supabase.from('system_info')          .select('system_version, ai_model_version, api_status, ai_endpoint_url, ai_poll_interval_sec, last_health_check').limit(1).single(),
+      supabase.from('fine_amounts')         .select('*').order('amount', { ascending: false }),
     ]);
 
     // Non-fatal: collect errors and report them alongside data
     const errors = [
       detection.error, thresholds.error, notifications.error,
-      camera.error, system.error,
+      camera.error, system.error, fineAmounts.error,
     ].filter(Boolean).map((e) => e.message);
 
     res.json({
@@ -50,6 +51,7 @@ router.get('/all', async (req, res, next) => {
         notifications : notifications.data,
         camera        : camera.data,
         system        : system.data,
+        fineAmounts   : fineAmounts.data,
       },
       errors: errors.length ? errors : undefined,
     });

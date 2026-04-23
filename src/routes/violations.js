@@ -32,6 +32,7 @@ router.get('/', async (req, res, next) => {
     const {
       type, status, driverName,
       dateFrom, dateTo,
+      penaltyFilter,
       page = 1, limit = 20,
     } = req.query;
 
@@ -49,6 +50,11 @@ router.get('/', async (req, res, next) => {
     if (driverName) query = query.ilike('driver_name', `%${driverName}%`);
     if (dateFrom)   query = query.gte('detection_date', dateFrom);
     if (dateTo)     query = query.lte('detection_date', dateTo);
+
+    // Penalty filter
+    if (penaltyFilter === 'fined')   query = query.eq('penalty_type', 'fine');
+    if (penaltyFilter === 'warning') query = query.eq('penalty_type', 'warning');
+    if (penaltyFilter === 'none')    query = query.is('penalty_type', null);
 
     query = query
       .order('inserted_at', { ascending: false })
