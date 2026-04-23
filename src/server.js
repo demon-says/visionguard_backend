@@ -30,8 +30,11 @@ const PORT = process.env.PORT || 5000;
 
 // ── Security & parsing middleware ─────────────────────────────
 app.use(helmet());
+
+// Sanitize CORS origin (Vercel env vars sometimes contain trailing whitespace)
+const corsOrigin = (process.env.CORS_ORIGIN || 'http://localhost:5173').trim();
 app.use(cors({
-  origin      : process.env.CORS_ORIGIN || 'http://localhost:5173',
+  origin      : corsOrigin.includes(',') ? corsOrigin.split(',').map(s => s.trim()) : corsOrigin,
   credentials : true,
 }));
 app.use(express.json({ limit: '2mb' }));
