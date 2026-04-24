@@ -34,19 +34,9 @@ let totalInserted = 0;
 // Falls back to .env values if the DB row has no URL set yet.
 // ─────────────────────────────────────────────────────────────
 async function loadAIConfig() {
-  const { data, error } = await supabase
-    .from('system_info')
-    .select('ai_endpoint_url, ai_poll_interval_sec')
-    .limit(1)
-    .single();
-
-  if (error) {
-    console.warn('[Poller] Could not read system_info, using .env fallback');
-  }
-
   return {
-    url      : data?.ai_endpoint_url      || process.env.AI_ENDPOINT_URL,
-    interval : data?.ai_poll_interval_sec || Number(process.env.AI_POLL_INTERVAL_SEC) || 30,
+    url      : process.env.AI_ENDPOINT_URL,
+    interval : Number(process.env.AI_POLL_INTERVAL_SEC) || 30,
   };
 }
 
