@@ -81,10 +81,46 @@ router.put('/config', async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────
 // GET /api/ai/status
-// Returns the current in-memory poller state.
+// On a persistent server, returns the in-memory poller state.
+// On Vercel (serverless), checks if violations were inserted
+// recently to determine if the cron-based pipeline is active.
 // ─────────────────────────────────────────────────────────────
-router.get('/status', (req, res) => {
-  res.json({ success: true, data: aiPoller.getStatus() });
+router.get('/status', async (req, res) => {
+  // Local / persistent server — use in-memory state
+  if (!process.env.VERCEL) {
+    return res.json({ success: true, data: aiPoller.getStatus() });
+  }
+
+  // Vercel serverless — check DB for recent activity
+  try {
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { count } = await supabase
+      .from('detected_violations')
+      .select('id', { count: 'exact', head: true })
+      .gte('inserted_at', fiveMinAgo);
+
+    const { count: totalCount } = await supabase
+      .from('detected_violations')
+      .select('id', { count: 'exact', head: true });
+
+    const hasUrl = !!(process.env.AI_ENDPOINT_URL);
+
+    res.json({
+      success: true,
+      data: {
+        isRunning     : hasUrl && (count ?? 0) > 0,
+        lastFetchAt   : null,
+        lastError     : hasUrl ? null : 'No AI_ENDPOINT_URL configured',
+        fetchCount    : count ?? 0,
+        totalInserted : totalCount ?? 0,
+      },
+    });
+  } catch (err) {
+    res.json({
+      success: true,
+      data: { isRunning: false, lastError: err.message, fetchCount: 0, totalInserted: 0 },
+    });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────
