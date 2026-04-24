@@ -39,6 +39,8 @@ const RAW_LABEL_MAP = {
   drowsiness   : 'drowsy',
   sleeping     : 'drowsy',
   sleep        : 'drowsy',
+  eyesleep     : 'drowsy',
+  laziness     : 'drowsy',
   smoking      : 'smoking',
   cigarette    : 'smoking',
   smoke        : 'smoking',
