@@ -81,17 +81,10 @@ router.put('/config', async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────
 // GET /api/ai/status
-// On a persistent server, returns the in-memory poller state.
-// On Vercel (serverless), checks if violations were inserted
-// recently to determine if the cron-based pipeline is active.
+// Checks the database for recently inserted violations to
+// determine if the AI pipeline is actively processing.
 // ─────────────────────────────────────────────────────────────
 router.get('/status', async (req, res) => {
-  // Local / persistent server — use in-memory state
-  if (!process.env.VERCEL) {
-    return res.json({ success: true, data: aiPoller.getStatus() });
-  }
-
-  // Vercel serverless — check DB for recent activity
   try {
     const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const { count } = await supabase
