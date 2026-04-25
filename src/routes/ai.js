@@ -81,30 +81,36 @@ router.put('/config', async (req, res, next) => {
 
 // ─────────────────────────────────────────────────────────────
 // GET /api/ai/status
-// Checks the database for recently inserted violations to
-// determine if the AI pipeline is actively processing.
+// Reads the poller heartbeat (last_poll_at) from system_info.
+// If the heartbeat is within the last 2 minutes → engine active.
+// Works on both local and Vercel since the heartbeat is in the DB.
 // ─────────────────────────────────────────────────────────────
 router.get('/status', async (req, res) => {
   try {
-    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    const { count } = await supabase
-      .from('detected_violations')
-      .select('id', { count: 'exact', head: true })
-      .gte('inserted_at', fiveMinAgo);
+    const { data, error } = await supabase
+      .from('system_info')
+      .select('last_poll_at')
+      .limit(1)
+      .single();
 
+    if (error) throw error;
+
+    const lastPoll = data?.last_poll_at ? new Date(data.last_poll_at) : null;
+    const twoMinAgo = Date.now() - 2 * 60 * 1000;
+    const isActive = lastPoll && lastPoll.getTime() > twoMinAgo;
+
+    // Also get total violations for display
     const { count: totalCount } = await supabase
       .from('detected_violations')
       .select('id', { count: 'exact', head: true });
 
-    const recentCount = count ?? 0;
-
     res.json({
       success: true,
       data: {
-        isRunning     : recentCount > 0,
-        lastFetchAt   : null,
-        lastError     : recentCount > 0 ? null : 'No violations detected in last 5 minutes',
-        fetchCount    : recentCount,
+        isRunning     : !!isActive,
+        lastFetchAt   : data?.last_poll_at || null,
+        lastError     : isActive ? null : 'No heartbeat in last 2 minutes',
+        fetchCount    : 0,
         totalInserted : totalCount ?? 0,
       },
     });

@@ -91,6 +91,15 @@ async function runFetchCycle() {
     lastError = err.message;
     console.error('[Poller] Fetch cycle failed:', err.message);
   }
+
+  // ── Heartbeat: write timestamp to DB so the status endpoint
+  //    knows the poller is alive, even if no violations were inserted.
+  try {
+    await supabase
+      .from('system_info')
+      .update({ last_poll_at: new Date().toISOString() })
+      .not('id', 'is', null);  // updates all rows (there's only one)
+  } catch (_) { /* non-fatal */ }
 }
 
 // ─────────────────────────────────────────────────────────────
