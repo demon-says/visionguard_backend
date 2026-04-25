@@ -11,11 +11,5 @@
       "src": "/(.*)",
       "dest": "src/server.js"
     }
-  ],
-  "crons": [
-    {
-      "path": "/api/cron/fetch",
-      "schedule": "* * * * *"
-    }
   ]
 }
