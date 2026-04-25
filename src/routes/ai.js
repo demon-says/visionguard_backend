@@ -103,15 +103,15 @@ router.get('/status', async (req, res) => {
       .from('detected_violations')
       .select('id', { count: 'exact', head: true });
 
-    const hasUrl = !!(process.env.AI_ENDPOINT_URL);
+    const recentCount = count ?? 0;
 
     res.json({
       success: true,
       data: {
-        isRunning     : hasUrl && (count ?? 0) > 0,
+        isRunning     : recentCount > 0,
         lastFetchAt   : null,
-        lastError     : hasUrl ? null : 'No AI_ENDPOINT_URL configured',
-        fetchCount    : count ?? 0,
+        lastError     : recentCount > 0 ? null : 'No violations detected in last 5 minutes',
+        fetchCount    : recentCount,
         totalInserted : totalCount ?? 0,
       },
     });
