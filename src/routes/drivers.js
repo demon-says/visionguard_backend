@@ -178,7 +178,11 @@ router.patch('/:id/status', async (req, res, next) => {
 
     const { data, error } = await supabase
       .from('drivers')
-      .update({ status, updated_at: new Date().toISOString() })
+      .update({
+        status,
+        last_active: status === 'suspended' ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', id)
       .select('id, name, status')
       .single();
