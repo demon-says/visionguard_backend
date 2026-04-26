@@ -46,19 +46,51 @@ router.get('/', async (req, res, next) => {
     if (sourceIds.length > 0) {
       const { data: buses } = await supabase
         .from('buses')
-        .select('id, source_id')
+        .select('id, source_id, bus_number')
         .in('source_id', sourceIds);
       if (buses) {
-        buses.forEach((b) => { busMap[b.source_id] = b.id; });
+        buses.forEach((b) => { busMap[b.source_id] = b; });
       }
     }
 
     // Enrich each route with bus_id
     data.forEach((route) => {
-      if (!route.bus_id && route.source_id) {
-        route.bus_id = busMap[route.source_id] || null;
+      if (!route.bus_id && route.source_id && busMap[route.source_id]) {
+        route.bus_id = busMap[route.source_id].id;
       }
     });
+
+    // For routes still missing bus info (no active assignment),
+    // look up the most recent assignment (even inactive) to recover the bus link.
+    const routesMissingBus = data.filter((r) => !r.bus_id);
+    if (routesMissingBus.length > 0) {
+      const missingRouteIds = routesMissingBus.map((r) => r.id);
+      const { data: pastAssignments } = await supabase
+        .from('assignments')
+        .select('route_id, bus_id, buses(id, bus_number, source_id)')
+        .in('route_id', missingRouteIds)
+        .order('created_at', { ascending: false });
+
+      if (pastAssignments) {
+        // Take the most recent assignment per route
+        const routeBusMap = {};
+        pastAssignments.forEach((a) => {
+          if (!routeBusMap[a.route_id] && a.bus_id) {
+            routeBusMap[a.route_id] = a;
+          }
+        });
+        data.forEach((route) => {
+          if (!route.bus_id && routeBusMap[route.id]) {
+            const past = routeBusMap[route.id];
+            route.bus_id = past.bus_id;
+            if (past.buses) {
+              route.bus_number = past.buses.bus_number || route.bus_number;
+              route.source_id = past.buses.source_id || route.source_id;
+            }
+          }
+        });
+      }
+    }
 
     // Also fetch route-level totals from violations
     const busIds = data.map((r) => r.bus_id).filter(Boolean);
