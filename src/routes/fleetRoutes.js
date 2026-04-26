@@ -159,8 +159,11 @@ router.get('/recommend/:driverId', async (req, res, next) => {
 // PATCH /api/routes/:id/assign
 // Assign a driver to a route (and optionally a bus).
 // Body: { driverId: 'uuid', busId: 'uuid' }
-// Deactivates old assignment for both the driver and the bus,
-// then creates a new active one — all in parallel where possible.
+// Validates driver safety score against route difficulty:
+//   >= 85  → demanding, moderate, simple
+//   60-84  → moderate, simple
+//   30-59  → simple only
+//   < 30   → cannot be assigned
 // ─────────────────────────────────────────────────────────────
 router.patch('/:id/assign', async (req, res, next) => {
   try {
@@ -169,6 +172,38 @@ router.patch('/:id/assign', async (req, res, next) => {
 
     if (!driverId || !busId) {
       return next(createError(400, 'driverId and busId are required', 'VALIDATION'));
+    }
+
+    // Fetch driver safety score and route difficulty in parallel
+    const [driverRes, routeRes] = await Promise.all([
+      supabase.from('drivers').select('id, name, safety_score').eq('id', driverId).single(),
+      supabase.from('routes').select('id, name, difficulty').eq('id', routeId).single(),
+    ]);
+
+    if (driverRes.error?.code === 'PGRST116') return next(createError(404, 'Driver not found', 'NOT_FOUND'));
+    if (routeRes.error?.code === 'PGRST116') return next(createError(404, 'Route not found', 'NOT_FOUND'));
+    assertNoError(driverRes.error, 'fetch driver');
+    assertNoError(routeRes.error, 'fetch route');
+
+    const score = Number(driverRes.data.safety_score);
+    const difficulty = routeRes.data.difficulty;
+
+    // Determine allowed difficulties based on safety score
+    let allowedDifficulties = [];
+    if (score >= 85) {
+      allowedDifficulties = ['demanding', 'moderate', 'simple'];
+    } else if (score >= 60) {
+      allowedDifficulties = ['moderate', 'simple'];
+    } else if (score >= 30) {
+      allowedDifficulties = ['simple'];
+    }
+    // score < 30 → empty array → cannot assign
+
+    if (!allowedDifficulties.includes(difficulty)) {
+      const reason = score < 30
+        ? `${driverRes.data.name} has a safety score of ${score}%, which is too low to be assigned any route.`
+        : `${driverRes.data.name} has a safety score of ${score}%, which is too low for a ${difficulty} route. Eligible: ${allowedDifficulties.join(', ')}.`;
+      return next(createError(400, reason, 'SCORE_TOO_LOW'));
     }
 
     // Deactivate any current active assignments for this driver AND this bus
