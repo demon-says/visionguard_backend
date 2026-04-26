@@ -220,22 +220,29 @@ router.patch('/:id/assign', async (req, res, next) => {
     const score = Number(driverRes.data.safety_score);
     const difficulty = routeRes.data.difficulty;
 
-    // Determine allowed difficulties based on safety score
-    let allowedDifficulties = [];
-    if (score >= 85) {
-      allowedDifficulties = ['demanding', 'moderate', 'simple'];
-    } else if (score >= 60) {
-      allowedDifficulties = ['moderate', 'simple'];
-    } else if (score >= 30) {
-      allowedDifficulties = ['simple'];
-    }
-    // score < 30 → empty array → cannot assign
+    // Skip safety score validation for BUS-001 (test bus)
+    const { data: busRow } = await supabase
+      .from('buses').select('bus_number').eq('id', busId).single();
+    const isTestBus = busRow?.bus_number === 'BUS-001';
 
-    if (!allowedDifficulties.includes(difficulty)) {
-      const reason = score < 30
-        ? `${driverRes.data.name} has a safety score of ${score}%, which is too low to be assigned any route.`
-        : `${driverRes.data.name} has a safety score of ${score}%, which is too low for a ${difficulty} route. Eligible: ${allowedDifficulties.join(', ')}.`;
-      return next(createError(400, reason, 'SCORE_TOO_LOW'));
+    if (!isTestBus) {
+      // Determine allowed difficulties based on safety score
+      let allowedDifficulties = [];
+      if (score >= 85) {
+        allowedDifficulties = ['demanding', 'moderate', 'simple'];
+      } else if (score >= 60) {
+        allowedDifficulties = ['moderate', 'simple'];
+      } else if (score >= 30) {
+        allowedDifficulties = ['simple'];
+      }
+      // score < 30 → empty array → cannot assign
+
+      if (!allowedDifficulties.includes(difficulty)) {
+        const reason = score < 30
+          ? `${driverRes.data.name} has a safety score of ${score}%, which is too low to be assigned any route.`
+          : `${driverRes.data.name} has a safety score of ${score}%, which is too low for a ${difficulty} route. Eligible: ${allowedDifficulties.join(', ')}.`;
+        return next(createError(400, reason, 'SCORE_TOO_LOW'));
+      }
     }
 
     // Deactivate any current active assignments for this driver AND this bus
